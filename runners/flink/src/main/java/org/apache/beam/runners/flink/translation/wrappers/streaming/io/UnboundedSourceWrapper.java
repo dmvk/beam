@@ -63,7 +63,7 @@ import org.slf4j.LoggerFactory;
 /** Wrapper for executing {@link UnboundedSource UnboundedSources} as a Flink Source. */
 public class UnboundedSourceWrapper<OutputT, CheckpointMarkT extends UnboundedSource.CheckpointMark>
     extends RichParallelSourceFunction<WindowedValue<ValueWithRecordId<OutputT>>>
-    implements ProcessingTimeCallback, StoppableFunction, CheckpointListener, CheckpointedFunction {
+    implements ProcessingTimeCallback, BeamStoppableFunction, CheckpointListener, CheckpointedFunction {
 
   private static final Logger LOG = LoggerFactory.getLogger(UnboundedSourceWrapper.class);
 
@@ -420,6 +420,7 @@ public class UnboundedSourceWrapper<OutputT, CheckpointMarkT extends UnboundedSo
     }
 
     OperatorStateStore stateStore = context.getOperatorStateStore();
+    @SuppressWarnings("unchecked")
     CoderTypeInformation<KV<? extends UnboundedSource<OutputT, CheckpointMarkT>, CheckpointMarkT>>
         typeInformation = (CoderTypeInformation) new CoderTypeInformation<>(checkpointCoder);
     stateForCheckpoint =
