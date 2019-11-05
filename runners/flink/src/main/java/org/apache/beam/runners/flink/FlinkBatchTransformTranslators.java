@@ -34,6 +34,7 @@ import org.apache.beam.runners.core.construction.ParDoTranslation;
 import org.apache.beam.runners.core.construction.ReadTranslation;
 import org.apache.beam.runners.flink.translation.functions.FlinkAssignWindows;
 import org.apache.beam.runners.flink.translation.functions.FlinkDoFnFunction;
+import org.apache.beam.runners.flink.translation.functions.FlinkIdentityMapFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkMergingNonShuffleReduceFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkMultiOutputPruningFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkPartialReduceFunction;
@@ -307,10 +308,18 @@ class FlinkBatchTransformTranslators {
     public void translateNode(
         Reshuffle<K, InputT> transform, FlinkBatchTranslationContext context) {
 
-      DataSet<WindowedValue<KV<K, InputT>>> inputDataSet =
+      final DataSet<WindowedValue<KV<K, InputT>>> inputDataSet =
           context.getInputDataSet(context.getInput(transform));
 
-      context.setOutputDataSet(context.getOutput(transform), inputDataSet.rebalance());
+      @SuppressWarnings("unchecked")
+      final CoderTypeInformation<WindowedValue<KV<K, InputT>>> inputType =
+          (CoderTypeInformation) inputDataSet.getType();
+      final DataSet<WindowedValue<KV<K, InputT>>> retypedDataSet =
+          inputDataSet
+              .map(FlinkIdentityMapFunction.of())
+              .returns(inputType.withPipelineOptions(context.getPipelineOptions()));
+
+      context.setOutputDataSet(context.getOutput(transform), retypedDataSet.rebalance());
     }
   }
 
