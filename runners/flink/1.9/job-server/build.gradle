@@ -16,6 +16,15 @@
  * limitations under the License.
  */
 
+/*
+ * Custom Flink repository
+ */
+repositories {
+  maven {
+    url = 'https://maven.dev.dszn.cz/content/repositories/ext-releases-local'
+  }
+}
+
 def basePath = '../../job-server'
 
 project.ext {

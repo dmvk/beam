@@ -116,14 +116,14 @@ test {
   if (System.getProperty("beamSurefireArgline")) {
     jvmArgs System.getProperty("beamSurefireArgline")
   }
-  // TODO Running tests of all Flink versions in parallel can be too harsh on Jenkins memory
-  // Run them serially for now, to avoid "Exit code 137", i.e. Jenkins host killing the Gradle test process
-  if (project.path == ":runners:flink:1.9") {
-    mustRunAfter(":runners:flink:1.8:test")
-  } else if (project.path == ":runners:flink:1.10") {
-    mustRunAfter(":runners:flink:1.8:test")
-    mustRunAfter(":runners:flink:1.9:test")
-  }
+  //// TODO Running tests of all Flink versions in parallel can be too harsh on Jenkins memory
+  //// Run them serially for now, to avoid "Exit code 137", i.e. Jenkins host killing the Gradle test process
+  //if (project.path == ":runners:flink:1.9") {
+  //  mustRunAfter(":runners:flink:1.8:test")
+  //} else if (project.path == ":runners:flink:1.10") {
+  //  mustRunAfter(":runners:flink:1.8:test")
+  //  mustRunAfter(":runners:flink:1.9:test")
+  //}
 }
 
 configurations {
@@ -180,6 +180,7 @@ class ValidatesRunnerConfig {
 def createValidatesRunnerTask(Map m) {
   def config = m as ValidatesRunnerConfig
   tasks.register(config.name, Test) {
+    it.jvmArgs += '-Dsun.io.serialization.extendedDebugInfo=true'
     group = "Verification"
     def runnerType = config.streaming ? "streaming" : "batch"
     description = "Validates the ${runnerType} runner"
@@ -187,6 +188,7 @@ def createValidatesRunnerTask(Map m) {
         ["--runner=TestFlinkRunner",
          "--streaming=${config.streaming}",
          "--parallelism=2",
+         "--objectReuse=true"
         ])
     systemProperty "beamTestPipelineOptions", pipelineOptions
     classpath = configurations.validatesRunner
