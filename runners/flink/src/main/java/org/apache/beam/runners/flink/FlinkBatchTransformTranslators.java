@@ -33,20 +33,24 @@ import org.apache.beam.runners.core.construction.PTransformTranslation;
 import org.apache.beam.runners.core.construction.ParDoTranslation;
 import org.apache.beam.runners.core.construction.ReadTranslation;
 import org.apache.beam.runners.flink.translation.functions.FlinkAssignWindows;
-import org.apache.beam.runners.flink.translation.functions.FlinkDoFnFunction;
+import org.apache.beam.runners.flink.translation.functions.FlinkExplodeWindowsFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkIdentityMapFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkMergingNonShuffleReduceFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkMultiOutputPruningFunction;
+import org.apache.beam.runners.flink.translation.functions.FlinkNonMergingReduceFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkPartialReduceFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkReduceFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkStatefulDoFnFunction;
+import org.apache.beam.runners.flink.translation.functions.SznFlinkDoFnFunction;
 import org.apache.beam.runners.flink.translation.types.CoderTypeInformation;
 import org.apache.beam.runners.flink.translation.types.KvKeySelector;
+import org.apache.beam.runners.flink.translation.types.WindowedKvKeySelector;
 import org.apache.beam.runners.flink.translation.wrappers.ImpulseInputFormat;
 import org.apache.beam.runners.flink.translation.wrappers.SourceInputFormat;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CoderRegistry;
+import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.ListCoder;
 import org.apache.beam.sdk.coders.VoidCoder;
@@ -64,6 +68,7 @@ import org.apache.beam.sdk.transforms.join.UnionCoder;
 import org.apache.beam.sdk.transforms.reflect.DoFnSignatures;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
+import org.apache.beam.sdk.transforms.windowing.TimestampCombiner;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
 import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
@@ -85,8 +90,8 @@ import org.apache.flink.api.java.operators.FlatMapOperator;
 import org.apache.flink.api.java.operators.GroupCombineOperator;
 import org.apache.flink.api.java.operators.GroupReduceOperator;
 import org.apache.flink.api.java.operators.Grouping;
-import org.apache.flink.api.java.operators.MapPartitionOperator;
 import org.apache.flink.api.java.operators.SingleInputUdfOperator;
+import org.apache.flink.api.java.operators.UnsortedGrouping;
 
 /**
  * Translators for transforming {@link PTransform PTransforms} to Flink {@link DataSet DataSets}.
@@ -98,40 +103,52 @@ class FlinkBatchTransformTranslators {
   // --------------------------------------------------------------------------------------------
 
   @SuppressWarnings("rawtypes")
-  private static final Map<String, FlinkBatchPipelineTranslator.BatchTransformTranslator>
+  private static final Map<String, List<FlinkBatchPipelineTranslator.BatchTransformTranslator>>
       TRANSLATORS = new HashMap<>();
 
-  static {
-    TRANSLATORS.put(PTransformTranslation.IMPULSE_TRANSFORM_URN, new ImpulseTranslatorBatch());
-
-    TRANSLATORS.put(
-        PTransformTranslation.CREATE_VIEW_TRANSFORM_URN,
-        new CreatePCollectionViewTranslatorBatch());
-
-    TRANSLATORS.put(
-        PTransformTranslation.COMBINE_PER_KEY_TRANSFORM_URN, new CombinePerKeyTranslatorBatch());
-    TRANSLATORS.put(
-        PTransformTranslation.GROUP_BY_KEY_TRANSFORM_URN, new GroupByKeyTranslatorBatch());
-    TRANSLATORS.put(PTransformTranslation.RESHUFFLE_URN, new ReshuffleTranslatorBatch());
-
-    TRANSLATORS.put(
-        PTransformTranslation.FLATTEN_TRANSFORM_URN, new FlattenPCollectionTranslatorBatch());
-
-    TRANSLATORS.put(
-        PTransformTranslation.ASSIGN_WINDOWS_TRANSFORM_URN, new WindowAssignTranslatorBatch());
-
-    TRANSLATORS.put(PTransformTranslation.PAR_DO_TRANSFORM_URN, new ParDoTranslatorBatch());
-
-    TRANSLATORS.put(PTransformTranslation.READ_TRANSFORM_URN, new ReadSourceTranslatorBatch());
+  private static void registerTranslator(
+      String urn, FlinkBatchPipelineTranslator.BatchTransformTranslator<?> translator) {
+    if (!TRANSLATORS.containsKey(urn)) {
+      TRANSLATORS.put(urn, new ArrayList<>());
+    }
+    TRANSLATORS.get(urn).add(translator);
   }
 
-  static FlinkBatchPipelineTranslator.BatchTransformTranslator<?> getTranslator(
-      PTransform<?, ?> transform) {
-    @Nullable String urn = PTransformTranslation.urnForTransformOrNull(transform);
-    return urn == null ? null : TRANSLATORS.get(urn);
+  static {
+    registerTranslator(PTransformTranslation.IMPULSE_TRANSFORM_URN, new ImpulseTranslatorBatch());
+    registerTranslator(
+        PTransformTranslation.CREATE_VIEW_TRANSFORM_URN,
+        new CreatePCollectionViewTranslatorBatch());
+    registerTranslator(
+        PTransformTranslation.COMBINE_PER_KEY_TRANSFORM_URN, new CombinePerKeyTranslatorBatch());
+    registerTranslator(
+        PTransformTranslation.GROUP_BY_KEY_TRANSFORM_URN, new SznGroupByKeyTranslatorBatch());
+    registerTranslator(
+        PTransformTranslation.GROUP_BY_KEY_TRANSFORM_URN, new GroupByKeyTranslatorBatch());
+    registerTranslator(PTransformTranslation.RESHUFFLE_URN, new ReshuffleTranslatorBatch());
+    registerTranslator(
+        PTransformTranslation.FLATTEN_TRANSFORM_URN, new FlattenPCollectionTranslatorBatch());
+    registerTranslator(
+        PTransformTranslation.ASSIGN_WINDOWS_TRANSFORM_URN, new WindowAssignTranslatorBatch());
+    registerTranslator(PTransformTranslation.PAR_DO_TRANSFORM_URN, new ParDoTranslatorBatch());
+    registerTranslator(PTransformTranslation.READ_TRANSFORM_URN, new ReadSourceTranslatorBatch());
   }
 
   @SuppressWarnings("unchecked")
+  static FlinkBatchPipelineTranslator.BatchTransformTranslator<?> getTranslator(
+      PTransform<?, ?> transform, FlinkBatchTranslationContext context) {
+    @Nullable final String urn = PTransformTranslation.urnForTransformOrNull(transform);
+    if (urn != null && TRANSLATORS.containsKey(urn)) {
+      for (FlinkBatchPipelineTranslator.BatchTransformTranslator translator :
+          TRANSLATORS.get(urn)) {
+        if (translator.canTranslate(transform, context)) {
+          return translator;
+        }
+      }
+    }
+    return null;
+  }
+
   private static String getCurrentTransformName(FlinkBatchTranslationContext context) {
     return context.getCurrentTransform().getFullName();
   }
@@ -221,6 +238,61 @@ class FlinkBatchTransformTranslators {
               .returns(resultTypeInfo);
 
       context.setOutputDataSet(context.getOutput(transform), resultDataSet);
+    }
+  }
+
+  private static class SznGroupByKeyTranslatorBatch<K, InputT>
+      implements FlinkBatchPipelineTranslator.BatchTransformTranslator<
+          PTransform<PCollection<KV<K, InputT>>, PCollection<KV<K, Iterable<InputT>>>>> {
+
+    @Override
+    public boolean canTranslate(
+        PTransform<PCollection<KV<K, InputT>>, PCollection<KV<K, Iterable<InputT>>>> transform,
+        FlinkBatchTranslationContext context) {
+      final WindowingStrategy<?, ?> windowingStrategy =
+          context.getOutput(transform).getWindowingStrategy();
+      return windowingStrategy.getWindowFn().isNonMerging()
+          && windowingStrategy.getTimestampCombiner() == TimestampCombiner.END_OF_WINDOW
+          && windowingStrategy.getWindowFn().windowCoder().consistentWithEquals();
+    }
+
+    @Override
+    public void translateNode(
+        PTransform<PCollection<KV<K, InputT>>, PCollection<KV<K, Iterable<InputT>>>> transform,
+        FlinkBatchTranslationContext context) {
+      final int numConsumers =
+          context.getOutputs(transform).values().stream().mapToInt(context::getPValueCount).sum();
+      final boolean multipleConsumers = numConsumers > 1;
+      final DataSet<WindowedValue<KV<K, InputT>>> inputDataSet =
+          context.getInputDataSet(context.getInput(transform));
+      final KvCoder<K, InputT> inputCoder =
+          (KvCoder<K, InputT>) context.getInput(transform).getCoder();
+      final WindowingStrategy<?, ?> windowingStrategy =
+          context.getInput(transform).getWindowingStrategy();
+      final String fullName = getCurrentTransformName(context);
+      final UnsortedGrouping<WindowedValue<KV<K, InputT>>> inputGrouping =
+          new FlatMapOperator<>(
+                  inputDataSet,
+                  inputDataSet.getType(),
+                  new FlinkExplodeWindowsFunction<>(),
+                  "ExplodeWindows: " + fullName)
+              .groupBy(
+                  new WindowedKvKeySelector<>(
+                      inputCoder.getKeyCoder(), windowingStrategy.getWindowFn().windowCoder()));
+      final TypeInformation<WindowedValue<KV<K, Iterable<InputT>>>> outputTypeInfo =
+          new CoderTypeInformation<>(
+              WindowedValue.getFullCoder(
+                  KvCoder.of(
+                      inputCoder.getKeyCoder(), IterableCoder.of(inputCoder.getValueCoder())),
+                  windowingStrategy.getWindowFn().windowCoder()));
+      final DataSet<WindowedValue<KV<K, Iterable<InputT>>>> outputDataSet =
+          new GroupReduceOperator<>(
+                  inputGrouping,
+                  outputTypeInfo,
+                  new FlinkNonMergingReduceFunction<>(windowingStrategy, multipleConsumers),
+                  fullName)
+              .returns(outputTypeInfo);
+      context.setOutputDataSet(context.getOutput(transform), outputDataSet);
     }
   }
 
@@ -612,8 +684,8 @@ class FlinkBatchTransformTranslators {
         outputDataSet = new GroupReduceOperator(grouping, typeInformation, doFnWrapper, fullName);
 
       } else {
-        FlinkDoFnFunction<InputT, RawUnionValue> doFnWrapper =
-            new FlinkDoFnFunction(
+        SznFlinkDoFnFunction<InputT, RawUnionValue> doFnWrapper =
+            new SznFlinkDoFnFunction(
                 doFn,
                 fullName,
                 windowingStrategy,
@@ -626,8 +698,7 @@ class FlinkBatchTransformTranslators {
                 doFnSchemaInformation,
                 sideInputMapping);
 
-        outputDataSet =
-            new MapPartitionOperator<>(inputDataSet, typeInformation, doFnWrapper, fullName);
+        outputDataSet = new FlatMapOperator<>(inputDataSet, typeInformation, doFnWrapper, fullName);
       }
 
       transformSideInputs(sideInputs, outputDataSet, context);
@@ -754,6 +825,4 @@ class FlinkBatchTransformTranslators {
       outputDataSet.withBroadcastSet(broadcastSet, input.getTagInternal().getId());
     }
   }
-
-  private FlinkBatchTransformTranslators() {}
 }
