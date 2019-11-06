@@ -166,6 +166,7 @@ class ValidatesRunnerConfig {
 def createValidatesRunnerTask(Map m) {
   def config = m as ValidatesRunnerConfig
   tasks.register(config.name, Test) {
+    it.jvmArgs += '-Dsun.io.serialization.extendedDebugInfo=true'
     group = "Verification"
     def runnerType = config.streaming ? "streaming" : "batch"
     description = "Validates the ${runnerType} runner"
@@ -173,6 +174,7 @@ def createValidatesRunnerTask(Map m) {
         ["--runner=TestFlinkRunner",
          "--streaming=${config.streaming}",
          "--parallelism=2",
+         "--objectReuse=true"
         ])
     systemProperty "beamTestPipelineOptions", pipelineOptions
     classpath = configurations.validatesRunner

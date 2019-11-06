@@ -22,6 +22,8 @@ import java.util.Map;
 import java.util.stream.Collectors;
 import org.apache.beam.runners.core.construction.TransformInputs;
 import org.apache.beam.runners.flink.translation.types.CoderTypeInformation;
+import org.apache.beam.runners.flink.translation.utils.CountingPipelineVisitor;
+import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.runners.AppliedPTransform;
@@ -57,6 +59,8 @@ class FlinkBatchTranslationContext {
 
   private AppliedPTransform<?, ?, ?> currentTransform;
 
+  private final CountingPipelineVisitor countingPipelineVisitor = new CountingPipelineVisitor();
+
   // ------------------------------------------------------------------------
 
   public FlinkBatchTranslationContext(ExecutionEnvironment env, PipelineOptions options) {
@@ -68,6 +72,13 @@ class FlinkBatchTranslationContext {
     this.danglingDataSets = new HashMap<>();
   }
 
+  public void initCounts(Pipeline pipeline) {
+    pipeline.traverseTopologically(countingPipelineVisitor);
+  }
+
+  public int getPValueCount(PValue value) {
+    return countingPipelineVisitor.getPValueCount(value);
+  }
   // ------------------------------------------------------------------------
 
   public Map<PValue, DataSet<?>> getDanglingDataSets() {
