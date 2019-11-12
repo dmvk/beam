@@ -77,6 +77,8 @@ public class SznFlinkDoFnFunction<InputT, OutputT>
   private transient DoFnRunner<InputT, OutputT> doFnRunner;
   private transient CollectorAware collectorAware;
 
+  private boolean bundleStarted = false;
+
   public SznFlinkDoFnFunction(
       DoFn<InputT, OutputT> doFn,
       String stepName,
@@ -105,11 +107,12 @@ public class SznFlinkDoFnFunction<InputT, OutputT>
 
   @Override
   public void flatMap(WindowedValue<InputT> value, Collector<WindowedValue<OutputT>> out) {
-    // todo increase bundle size
+    if (!bundleStarted) {
+      bundleStarted = true;
+      doFnRunner.startBundle();
+    }
     collectorAware.setCollector(out);
-    doFnRunner.startBundle();
     doFnRunner.processElement(value);
-    doFnRunner.finishBundle();
   }
 
   @Override
@@ -159,8 +162,20 @@ public class SznFlinkDoFnFunction<InputT, OutputT>
 
   @Override
   public void close() throws Exception {
+    Exception suppressed = null;
+    try {
+      if (bundleStarted) {
+        doFnRunner.finishBundle();
+      }
+    } catch (Exception e) {
+      // Suppress exception, so we can properly teardown DoFn.
+      suppressed = e;
+    }
     try {
       Optional.ofNullable(doFnInvoker).ifPresent(DoFnInvoker::invokeTeardown);
+      if (suppressed != null) {
+        throw suppressed;
+      }
     } finally {
       FlinkClassloading.deleteStaticCaches();
     }
