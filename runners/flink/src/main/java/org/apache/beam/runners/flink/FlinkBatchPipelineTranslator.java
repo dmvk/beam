@@ -46,7 +46,7 @@ class FlinkBatchPipelineTranslator extends FlinkPipelineTranslator {
   @Override
   @SuppressWarnings("rawtypes, unchecked")
   public void translate(Pipeline pipeline) {
-    batchContext.initCounts(pipeline);
+    batchContext.init(pipeline);
     super.translate(pipeline);
 
     // terminate dangling DataSets
