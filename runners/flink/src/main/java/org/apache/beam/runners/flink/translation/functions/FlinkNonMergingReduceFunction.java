@@ -20,6 +20,8 @@ package org.apache.beam.runners.flink.translation.functions;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.PaneInfo;
 import org.apache.beam.sdk.util.WindowedValue;
@@ -27,6 +29,8 @@ import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.WindowingStrategy;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.AbstractIterator;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterators;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.PeekingIterator;
 import org.apache.flink.api.common.functions.GroupReduceFunction;
 import org.apache.flink.util.Collector;
 import org.joda.time.Instant;
@@ -34,6 +38,25 @@ import org.joda.time.Instant;
 public class FlinkNonMergingReduceFunction<K, InputT>
     implements GroupReduceFunction<
         WindowedValue<KV<K, InputT>>, WindowedValue<KV<K, Iterable<InputT>>>> {
+
+  private static class OnceIterable<T> implements Iterable<T> {
+
+    private final Iterator<T> iterator;
+
+    private final AtomicBoolean used = new AtomicBoolean(false);
+
+    OnceIterable(Iterator<T> iterator) {
+      this.iterator = iterator;
+    }
+
+    @Override
+    public Iterator<T> iterator() {
+      if (used.compareAndSet(false, true)) {
+        return iterator;
+      }
+      throw new IllegalStateException("Not re-iterable.");
+    }
+  }
 
   private static class ValueIterator<K, InputT> extends AbstractIterator<InputT> {
 
@@ -74,8 +97,9 @@ public class FlinkNonMergingReduceFunction<K, InputT>
   public void reduce(
       Iterable<WindowedValue<KV<K, InputT>>> input,
       Collector<WindowedValue<KV<K, Iterable<InputT>>>> coll) {
-    final Iterator<WindowedValue<KV<K, InputT>>> iterator = input.iterator();
-    final WindowedValue<KV<K, InputT>> first = iterator.next();
+    final PeekingIterator<WindowedValue<KV<K, InputT>>> iterator =
+        Iterators.peekingIterator(input.iterator());
+    final WindowedValue<KV<K, InputT>> first = iterator.peek();
     final BoundedWindow window = Iterables.getOnlyElement(first.getWindows());
     @SuppressWarnings("unchecked")
     final Instant outputTimestamp =
@@ -87,11 +111,15 @@ public class FlinkNonMergingReduceFunction<K, InputT>
     final Iterable<InputT> values;
     if (multipleConsumers) {
       final List<InputT> lst = new ArrayList<>();
-      lst.add(first.getValue().getValue());
       iterator.forEachRemaining(wv -> lst.add(wv.getValue().getValue()));
       values = lst;
     } else {
-      values = () -> new ValueIterator<>(first, iterator);
+      values =
+          new OnceIterable<>(
+              Iterators.transform(
+                  iterator,
+                  (WindowedValue<KV<K, InputT>> wv) ->
+                      Objects.requireNonNull(wv).getValue().getValue()));
     }
     coll.collect(
         WindowedValue.of(
