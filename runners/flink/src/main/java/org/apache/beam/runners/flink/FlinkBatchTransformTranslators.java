@@ -250,7 +250,7 @@ class FlinkBatchTransformTranslators {
         PTransform<PCollection<KV<K, InputT>>, PCollection<KV<K, Iterable<InputT>>>> transform,
         FlinkBatchTranslationContext context) {
       final WindowingStrategy<?, ?> windowingStrategy =
-          context.getOutput(transform).getWindowingStrategy();
+          context.getInput(transform).getWindowingStrategy();
       return windowingStrategy.getWindowFn().isNonMerging()
           && windowingStrategy.getTimestampCombiner() == TimestampCombiner.END_OF_WINDOW
           && windowingStrategy.getWindowFn().windowCoder().consistentWithEquals();
@@ -657,7 +657,7 @@ class FlinkBatchTransformTranslators {
         throw new RuntimeException(e);
       }
 
-      Map<TupleTag<?>, Coder<?>> outputCoderMap = context.getOutputCoders();
+      Map<TupleTag<?>, Coder<?>> outputCoderMap = context.getOutputCoders(transform);
 
       String fullName = getCurrentTransformName(context);
       if (usesStateOrTimers) {
