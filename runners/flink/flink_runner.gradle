@@ -42,15 +42,6 @@ evaluationDependsOn(":sdks:java:core")
 evaluationDependsOn(":runners:core-java")
 
 /*
- * Custom Flink repository
- */
-repositories {
-  maven {
-    url = 'https://maven.dev.dszn.cz/content/repositories/ext-releases-local'
-  }
-}
-
-/*
  * Copy & merge source overrides into build directory.
  */
 def sourceOverridesBase = "${project.buildDir}/source-overrides/src"
