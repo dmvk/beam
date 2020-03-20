@@ -33,6 +33,7 @@ import org.apache.beam.runners.core.construction.PTransformTranslation;
 import org.apache.beam.runners.core.construction.ParDoTranslation;
 import org.apache.beam.runners.core.construction.ReadTranslation;
 import org.apache.beam.runners.flink.translation.functions.FlinkAssignWindows;
+import org.apache.beam.runners.flink.translation.functions.FlinkDoFnFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkExplodeWindowsFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkIdentityFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkMergingNonShuffleReduceFunction;
@@ -41,7 +42,6 @@ import org.apache.beam.runners.flink.translation.functions.FlinkNonMergingReduce
 import org.apache.beam.runners.flink.translation.functions.FlinkPartialReduceFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkReduceFunction;
 import org.apache.beam.runners.flink.translation.functions.FlinkStatefulDoFnFunction;
-import org.apache.beam.runners.flink.translation.functions.SznFlinkDoFnFunction;
 import org.apache.beam.runners.flink.translation.types.CoderTypeInformation;
 import org.apache.beam.runners.flink.translation.types.KvKeySelector;
 import org.apache.beam.runners.flink.translation.types.WindowedKvKeySelector;
@@ -704,8 +704,8 @@ class FlinkBatchTransformTranslators {
         outputDataSet = new GroupReduceOperator(grouping, typeInformation, doFnWrapper, fullName);
 
       } else {
-        SznFlinkDoFnFunction<InputT, RawUnionValue> doFnWrapper =
-            new SznFlinkDoFnFunction(
+        FlinkDoFnFunction<InputT, RawUnionValue> doFnWrapper =
+            new FlinkDoFnFunction(
                 doFn,
                 fullName,
                 windowingStrategy,

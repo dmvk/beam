@@ -19,7 +19,9 @@ package org.apache.beam.runners.flink.translation.functions;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import javax.annotation.Nullable;
 import org.apache.beam.runners.core.DoFnRunner;
 import org.apache.beam.runners.core.DoFnRunners;
 import org.apache.beam.runners.core.construction.SerializablePipelineOptions;
@@ -40,7 +42,7 @@ import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.WindowingStrategy;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.flink.api.common.functions.RichMapPartitionFunction;
+import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.util.Collector;
@@ -54,7 +56,7 @@ import org.apache.flink.util.Collector;
  * not to be in a specific output.
  */
 public class FlinkDoFnFunction<InputT, OutputT>
-    extends RichMapPartitionFunction<WindowedValue<InputT>, WindowedValue<OutputT>> {
+    extends RichFlatMapFunction<WindowedValue<InputT>, WindowedValue<OutputT>> {
 
   private final SerializablePipelineOptions serializedOptions;
 
@@ -71,8 +73,12 @@ public class FlinkDoFnFunction<InputT, OutputT>
   private final DoFnSchemaInformation doFnSchemaInformation;
   private final Map<String, PCollectionView<?>> sideInputMapping;
 
+  private transient CollectorAware collectorAware;
   private transient DoFnInvoker<InputT, OutputT> doFnInvoker;
+  private transient DoFnRunner<InputT, OutputT> doFnRunner;
   private transient FlinkMetricContainer metricContainer;
+
+  private boolean bundleStarted = false;
 
   public FlinkDoFnFunction(
       DoFn<InputT, OutputT> doFn,
@@ -101,21 +107,36 @@ public class FlinkDoFnFunction<InputT, OutputT>
   }
 
   @Override
-  public void mapPartition(
-      Iterable<WindowedValue<InputT>> values, Collector<WindowedValue<OutputT>> out)
+  public void flatMap(WindowedValue<InputT> value, Collector<WindowedValue<OutputT>> out)
       throws Exception {
+    if (!bundleStarted) {
+      bundleStarted = true;
+      doFnRunner.startBundle();
+    }
+    collectorAware.setCollector(out);
+    doFnRunner.processElement(value);
+  }
 
-    RuntimeContext runtimeContext = getRuntimeContext();
+  @Override
+  public void open(Configuration parameters) {
+    // Note that the SerializablePipelineOptions already initialize FileSystems in the readObject()
+    // deserialization method. However, this is a hack, and we want to properly initialize the
+    // options where they are needed.
+    FileSystems.setDefaultPipelineOptions(serializedOptions.get());
+    doFnInvoker = DoFnInvokers.tryInvokeSetupFor(doFn);
+    metricContainer = new FlinkMetricContainer(getRuntimeContext());
 
-    DoFnRunners.OutputManager outputManager;
+    // setup DoFnRunner
+    final RuntimeContext runtimeContext = getRuntimeContext();
+    final DoFnRunners.OutputManager outputManager;
     if (outputMap.size() == 1) {
-      outputManager = new FlinkDoFnFunction.DoFnOutputManager(out);
+      outputManager = new DoFnOutputManager();
     } else {
       // it has some additional outputs
-      outputManager = new FlinkDoFnFunction.MultiDoFnOutputManager((Collector) out, outputMap);
+      outputManager = new MultiDoFnOutputManager(outputMap);
     }
 
-    List<TupleTag<?>> additionalOutputTags = Lists.newArrayList(outputMap.keySet());
+    final List<TupleTag<?>> additionalOutputTags = Lists.newArrayList(outputMap.keySet());
 
     DoFnRunner<InputT, OutputT> doFnRunner =
         DoFnRunners.simpleRunner(
@@ -132,79 +153,99 @@ public class FlinkDoFnFunction<InputT, OutputT>
             doFnSchemaInformation,
             sideInputMapping);
 
-    FlinkPipelineOptions pipelineOptions = serializedOptions.get().as(FlinkPipelineOptions.class);
-    if (!pipelineOptions.getDisableMetrics()) {
+    if (!serializedOptions.get().as(FlinkPipelineOptions.class).getDisableMetrics()) {
       doFnRunner = new DoFnRunnerWithMetricsUpdate<>(stepName, doFnRunner, metricContainer);
     }
 
-    doFnRunner.startBundle();
-
-    for (WindowedValue<InputT> value : values) {
-      doFnRunner.processElement(value);
-    }
-
-    doFnRunner.finishBundle();
-  }
-
-  @Override
-  public void open(Configuration parameters) {
-    // Note that the SerializablePipelineOptions already initialize FileSystems in the readObject()
-    // deserialization method. However, this is a hack, and we want to properly initialize the
-    // options where they are needed.
-    FileSystems.setDefaultPipelineOptions(serializedOptions.get());
-    doFnInvoker = DoFnInvokers.tryInvokeSetupFor(doFn);
-    metricContainer = new FlinkMetricContainer(getRuntimeContext());
+    this.collectorAware = (CollectorAware) outputManager;
+    this.doFnRunner = doFnRunner;
   }
 
   @Override
   public void close() throws Exception {
+    Exception suppressed = null;
+    try {
+      if (bundleStarted) {
+        doFnRunner.finishBundle();
+      }
+    } catch (Exception e) {
+      // Suppress exception, so we can properly teardown DoFn.
+      suppressed = e;
+    }
     try {
       metricContainer.registerMetricsForPipelineResult();
       Optional.ofNullable(doFnInvoker).ifPresent(DoFnInvoker::invokeTeardown);
+      if (suppressed != null) {
+        throw suppressed;
+      }
     } finally {
       Workarounds.deleteStaticCaches();
     }
   }
 
-  static class DoFnOutputManager implements DoFnRunners.OutputManager {
+  interface CollectorAware {
 
-    private Collector collector;
+    void setCollector(Collector collector);
+  }
 
-    DoFnOutputManager(Collector collector) {
+  static class DoFnOutputManager implements DoFnRunners.OutputManager, CollectorAware {
+
+    @Nullable private Collector collector;
+
+    DoFnOutputManager() {
+      this(null);
+    }
+
+    DoFnOutputManager(@Nullable Collector collector) {
       this.collector = collector;
+    }
+
+    @Override
+    public void setCollector(Collector collector) {
+      this.collector = Objects.requireNonNull(collector);
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public <T> void output(TupleTag<T> tag, WindowedValue<T> output) {
-      collector.collect(
-          WindowedValue.of(
-              new RawUnionValue(0 /* single output */, output.getValue()),
-              output.getTimestamp(),
-              output.getWindows(),
-              output.getPane()));
+      Objects.requireNonNull(collector)
+          .collect(
+              WindowedValue.of(
+                  new RawUnionValue(0 /* single output */, output.getValue()),
+                  output.getTimestamp(),
+                  output.getWindows(),
+                  output.getPane()));
     }
   }
 
-  static class MultiDoFnOutputManager implements DoFnRunners.OutputManager {
+  static class MultiDoFnOutputManager implements DoFnRunners.OutputManager, CollectorAware {
 
-    private Collector<WindowedValue<RawUnionValue>> collector;
+    @Nullable private Collector<WindowedValue<RawUnionValue>> collector;
     private Map<TupleTag<?>, Integer> outputMap;
 
-    MultiDoFnOutputManager(
-        Collector<WindowedValue<RawUnionValue>> collector, Map<TupleTag<?>, Integer> outputMap) {
+    MultiDoFnOutputManager(Map<TupleTag<?>, Integer> outputMap) {
+      this.outputMap = outputMap;
+    }
+    MultiDoFnOutputManager(@Nullable Collector collector, Map<TupleTag<?>, Integer> outputMap) {
       this.collector = collector;
       this.outputMap = outputMap;
     }
 
     @Override
+    @SuppressWarnings("unchecked")
+    public void setCollector(Collector collector) {
+      this.collector = Objects.requireNonNull(collector);
+    }
+
+    @Override
     public <T> void output(TupleTag<T> tag, WindowedValue<T> output) {
-      collector.collect(
-          WindowedValue.of(
-              new RawUnionValue(outputMap.get(tag), output.getValue()),
-              output.getTimestamp(),
-              output.getWindows(),
-              output.getPane()));
+      Objects.requireNonNull(collector)
+          .collect(
+              WindowedValue.of(
+                  new RawUnionValue(outputMap.get(tag), output.getValue()),
+                  output.getTimestamp(),
+                  output.getWindows(),
+                  output.getPane()));
     }
   }
 }
