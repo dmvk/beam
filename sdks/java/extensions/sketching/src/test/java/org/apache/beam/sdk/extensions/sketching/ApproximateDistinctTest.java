@@ -25,6 +25,7 @@ import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
 import org.apache.avro.generic.GenericData;
@@ -35,12 +36,15 @@ import org.apache.beam.sdk.extensions.sketching.ApproximateDistinct.ApproximateD
 import org.apache.beam.sdk.testing.CoderProperties;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
+import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.transforms.Values;
+import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.WithKeys;
 import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PCollectionView;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
@@ -126,6 +130,44 @@ public class ApproximateDistinctTest implements Serializable {
   }
 
   @Test
+  public void perKeyWithInitalValue() {
+    final int cardinality = 1000;
+    final int p = 15;
+    final double expectedErr = 1.04 / Math.sqrt(p);
+    System.out.println(expectedErr);
+
+    final List<Integer> stream = new ArrayList<>();
+    for (int i = 1; i <= cardinality; i++) {
+      stream.addAll(Collections.nCopies(2, i));
+    }
+    Collections.shuffle(stream);
+
+    final PCollectionView<Map<Integer, HyperLogLogPlus>> initialValue =
+        tp.apply("initial - per key stream", Create.of(stream))
+            .apply("initial - create keys", WithKeys.of(1))
+            .apply(
+                "initial - per key hll",
+                Combine.perKey(
+                    ApproximateDistinctFn.create(BigEndianIntegerCoder.of()).withPrecision(p)))
+            .apply("initial - create view", View.asMap());
+
+    final PCollection<Long> results =
+        tp.apply("per key stream", Create.of(Collections.singleton(1)))
+            .apply("create keys", WithKeys.of(1))
+            .apply(
+                "per key cardinality",
+                ApproximateDistinct.<Integer, Integer>perKey()
+                    .withPrecision(p)
+                    .withInitialValue(initialValue))
+            .apply("extract values", Values.create());
+
+    PAssert.that("Verify Accuracy for cardinality per key", results)
+        .satisfies(new VerifyAccuracy(cardinality, expectedErr));
+
+    tp.run();
+  }
+
+  @Test
   public void customObject() {
     final int cardinality = 500;
     final int p = 15;
@@ -188,7 +230,8 @@ public class ApproximateDistinctTest implements Serializable {
     @Override
     public Void apply(Iterable<Long> input) {
       for (Long estimate : input) {
-        boolean isAccurate = Math.abs(estimate - expectedCard) / expectedCard < expectedError;
+        boolean isAccurate =
+            Math.abs(estimate - expectedCard) / (float) expectedCard < expectedError;
         Assert.assertTrue(
             "not accurate enough : \nExpected Cardinality : "
                 + expectedCard

@@ -25,6 +25,9 @@ import com.google.auto.value.AutoValue;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Arrays;
+import java.util.Map;
+import javax.annotation.Nullable;
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.Coder;
@@ -33,6 +36,8 @@ import org.apache.beam.sdk.coders.CustomCoder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.Combine.CombineFn;
+import org.apache.beam.sdk.transforms.CombineWithContext;
+import org.apache.beam.sdk.transforms.CombineWithContext.CombineFnWithContext;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -40,6 +45,7 @@ import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PCollectionView;
 
 /**
  * {@link PTransform}s for computing the approximate number of distinct elements in a stream.
@@ -320,6 +326,9 @@ public final class ApproximateDistinct {
 
     abstract int sparsePrecision();
 
+    @Nullable
+    abstract PCollectionView<Map<K, HyperLogLogPlus>> initialValue();
+
     abstract Builder<K, V> toBuilder();
 
     static <K, V> Builder<K, V> builder() {
@@ -333,6 +342,8 @@ public final class ApproximateDistinct {
       abstract Builder<K, V> setPrecision(int p);
 
       abstract Builder<K, V> setSparsePrecision(int sp);
+
+      abstract Builder<K, V> setInitialValue(PCollectionView<Map<K, HyperLogLogPlus>> initialValue);
 
       abstract PerKeyDistinct<K, V> build();
     }
@@ -367,16 +378,37 @@ public final class ApproximateDistinct {
       return toBuilder().setSparsePrecision(sp).build();
     }
 
+    public PerKeyDistinct<K, V> withInitialValue(
+        PCollectionView<Map<K, HyperLogLogPlus>> initialValue) {
+      return toBuilder().setInitialValue(initialValue).build();
+    }
+
     @Override
     public PCollection<KV<K, Long>> expand(PCollection<KV<K, V>> input) {
       KvCoder<K, V> inputCoder = (KvCoder<K, V>) input.getCoder();
-      return input
-          .apply(
-              Combine.perKey(
-                  ApproximateDistinctFn.create(inputCoder.getValueCoder())
-                      .withPrecision(this.precision())
-                      .withSparseRepresentation(this.sparsePrecision())))
-          .apply("Retrieve Cardinality", ParDo.of(RetrieveCardinality.perKey()));
+      final PCollection<KV<K, HyperLogLogPlus>> hll;
+      if (initialValue() == null) {
+        hll =
+            input.apply(
+                Combine.perKey(
+                    ApproximateDistinctFn.create(inputCoder.getValueCoder())
+                        .withPrecision(precision())
+                        .withSparseRepresentation(sparsePrecision())));
+      } else {
+        System.out.println("x");
+        hll =
+            input
+                .apply(ParDo.of(new KeyToValue<>()))
+                .apply(
+                    Combine.<K, KV<K, V>, HyperLogLogPlus>perKey(
+                            new ApproximateDistinctFnWithDefaults<>(
+                                ApproximateDistinctFn.create(inputCoder.getValueCoder())
+                                    .withPrecision(precision())
+                                    .withSparseRepresentation(sparsePrecision()),
+                                initialValue()))
+                        .withSideInputs(initialValue()));
+      }
+      return hll.apply("Retrieve Cardinality", ParDo.of(RetrieveCardinality.perKey()));
     }
   }
 
@@ -497,6 +529,57 @@ public final class ApproximateDistinct {
     }
   }
 
+  private static class ApproximateDistinctFnWithDefaults<K, InputT>
+      extends CombineFnWithContext<KV<K, InputT>, HyperLogLogPlus, HyperLogLogPlus> {
+
+    private final ApproximateDistinctFn<InputT> delegate;
+    private final PCollectionView<Map<K, HyperLogLogPlus>> initialValue;
+
+    ApproximateDistinctFnWithDefaults(
+        ApproximateDistinctFn<InputT> delegate,
+        PCollectionView<Map<K, HyperLogLogPlus>> initialValue) {
+      this.delegate = delegate;
+      this.initialValue = initialValue;
+    }
+
+    @Override
+    public HyperLogLogPlus createAccumulator(CombineWithContext.Context c) {
+      return delegate.createAccumulator();
+    }
+
+    @Override
+    public HyperLogLogPlus addInput(
+        HyperLogLogPlus accumulator, KV<K, InputT> input, CombineWithContext.Context c) {
+      if (accumulator.cardinality() == 0L) {
+        final Map<K, HyperLogLogPlus> lookupMap = c.sideInput(initialValue);
+        final HyperLogLogPlus initialValue = lookupMap.get(input.getKey());
+        if (initialValue != null && initialValue.cardinality() > 0L) {
+          return delegate.addInput(
+              delegate.mergeAccumulators(Arrays.asList(accumulator, initialValue)),
+              input.getValue());
+        }
+      }
+      return delegate.addInput(accumulator, input.getValue());
+    }
+
+    @Override
+    public HyperLogLogPlus mergeAccumulators(
+        Iterable<HyperLogLogPlus> accumulators, CombineWithContext.Context c) {
+      return delegate.mergeAccumulators(accumulators);
+    }
+
+    @Override
+    public HyperLogLogPlus extractOutput(
+        HyperLogLogPlus accumulator, CombineWithContext.Context c) {
+      return delegate.extractOutput(accumulator);
+    }
+
+    @Override
+    public void populateDisplayData(DisplayData.Builder builder) {
+      delegate.populateDisplayData(builder);
+    }
+  }
+
   /** Coder for {@link HyperLogLogPlus} class. */
   public static class HyperLogLogPlusCoder extends CustomCoder<HyperLogLogPlus> {
 
@@ -532,6 +615,15 @@ public final class ApproximateDistinct {
         throw new CoderException("cannot encode a null HyperLogLogPlus sketch");
       }
       return value.sizeof();
+    }
+  }
+
+  private static class KeyToValue<K, V> extends DoFn<KV<K, V>, KV<K, KV<K, V>>> {
+
+    @ProcessElement
+    public void processElement(ProcessContext c) {
+      final KV<K, V> element = c.element();
+      c.output(KV.of(element.getKey(), element));
     }
   }
 
