@@ -120,6 +120,8 @@ class FlinkBatchTransformTranslators {
         PTransformTranslation.CREATE_VIEW_TRANSFORM_URN,
         new CreatePCollectionViewTranslatorBatch());
     registerTranslator(
+            PTransformTranslation.COMBINE_PER_KEY_TRANSFORM_URN, new NonMergingCombinePerKeyTranslatorBatch());
+    registerTranslator(
         PTransformTranslation.COMBINE_PER_KEY_TRANSFORM_URN, new CombinePerKeyTranslatorBatch());
     registerTranslator(
         PTransformTranslation.GROUP_BY_KEY_TRANSFORM_URN, new SznGroupByKeyTranslatorBatch());
@@ -439,6 +441,102 @@ class FlinkBatchTransformTranslators {
     @Override
     public Coder<List<T>> getDefaultOutputCoder(CoderRegistry registry, Coder<T> inputCoder) {
       return ListCoder.of(inputCoder);
+    }
+  }
+
+  private static class NonMergingCombinePerKeyTranslatorBatch<K, InputT, AccumT, OutputT>
+      implements FlinkBatchPipelineTranslator.BatchTransformTranslator<
+          PTransform<PCollection<KV<K, InputT>>, PCollection<KV<K, OutputT>>>> {
+
+    @Override
+    public boolean canTranslate(
+        PTransform<PCollection<KV<K, InputT>>, PCollection<KV<K, OutputT>>> transform,
+        FlinkBatchTranslationContext context) {
+      final WindowingStrategy<?, ?> windowingStrategy =
+          context.getInput(transform).getWindowingStrategy();
+      return windowingStrategy.getWindowFn().isNonMerging()
+          && windowingStrategy.getTimestampCombiner() == TimestampCombiner.END_OF_WINDOW
+          && windowingStrategy.getWindowFn().windowCoder().consistentWithEquals();
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public void translateNode(
+        PTransform<PCollection<KV<K, InputT>>, PCollection<KV<K, OutputT>>> transform,
+        FlinkBatchTranslationContext context) {
+      final DataSet<WindowedValue<KV<K, InputT>>> inputDataSet =
+          context.getInputDataSet(context.getInput(transform));
+      final CombineFnBase.GlobalCombineFn<InputT, AccumT, OutputT> combineFn =
+          ((Combine.PerKey) transform).getFn();
+      final KvCoder<K, InputT> inputCoder =
+          (KvCoder<K, InputT>) context.getInput(transform).getCoder();
+      final Coder<AccumT> accumulatorCoder;
+      try {
+        accumulatorCoder =
+            combineFn.getAccumulatorCoder(
+                context.getInput(transform).getPipeline().getCoderRegistry(),
+                inputCoder.getValueCoder());
+      } catch (CannotProvideCoderException e) {
+        throw new RuntimeException(e);
+      }
+      final WindowingStrategy<?, ?> windowingStrategy =
+          context.getInput(transform).getWindowingStrategy();
+      final TypeInformation<WindowedValue<KV<K, AccumT>>> partialReduceTypeInfo =
+          context.getTypeInfo(
+              KvCoder.of(inputCoder.getKeyCoder(), accumulatorCoder), windowingStrategy);
+
+      final String fullName = getCurrentTransformName(context);
+      final UnsortedGrouping<WindowedValue<KV<K, InputT>>> inputGrouping =
+          new FlatMapOperator<>(
+                  inputDataSet,
+                  inputDataSet.getType(),
+                  new FlinkExplodeWindowsFunction<>(),
+                  "ExplodeWindows: " + fullName)
+              .groupBy(
+                  new WindowedKvKeySelector<>(
+                      inputCoder.getKeyCoder(), windowingStrategy.getWindowFn().windowCoder()));
+
+      // construct a map from side input to WindowingStrategy so that
+      // the DoFn runner can map main-input windows to side input windows
+      Map<PCollectionView<?>, WindowingStrategy<?, ?>> sideInputStrategies = new HashMap<>();
+      for (PCollectionView<?> sideInput :
+          (List<PCollectionView<?>>) ((Combine.PerKey) transform).getSideInputs()) {
+        sideInputStrategies.put(sideInput, sideInput.getWindowingStrategyInternal());
+      }
+
+      WindowingStrategy<Object, BoundedWindow> boundedStrategy =
+          (WindowingStrategy<Object, BoundedWindow>) windowingStrategy;
+
+      FlinkPartialReduceFunction<K, InputT, AccumT, ?> partialReduceFunction =
+          new FlinkPartialReduceFunction<>(
+              combineFn, boundedStrategy, sideInputStrategies, context.getPipelineOptions(), true);
+
+      FlinkReduceFunction<K, AccumT, OutputT, ?> reduceFunction =
+          new FlinkReduceFunction<>(
+              combineFn, boundedStrategy, sideInputStrategies, context.getPipelineOptions(), true);
+
+      // Partially GroupReduce the values into the intermediate format AccumT (combine)
+      GroupCombineOperator<WindowedValue<KV<K, InputT>>, WindowedValue<KV<K, AccumT>>>
+          groupCombine =
+              new GroupCombineOperator<>(
+                  inputGrouping,
+                  partialReduceTypeInfo,
+                  partialReduceFunction,
+                  "GroupCombine: " + fullName);
+      transformSideInputs(((Combine.PerKey) transform).getSideInputs(), groupCombine, context);
+      TypeInformation<WindowedValue<KV<K, OutputT>>> reduceTypeInfo =
+          context.getTypeInfo(context.getOutput(transform));
+      Grouping<WindowedValue<KV<K, AccumT>>> intermediateGrouping =
+          groupCombine.groupBy(
+                  new WindowedKvKeySelector<>(
+                          inputCoder.getKeyCoder(), windowingStrategy.getWindowFn().windowCoder()));
+      // Fully reduce the values and create output format OutputT
+      GroupReduceOperator<WindowedValue<KV<K, AccumT>>, WindowedValue<KV<K, OutputT>>>
+          outputDataSet =
+              new GroupReduceOperator<>(
+                  intermediateGrouping, reduceTypeInfo, reduceFunction, fullName);
+      transformSideInputs(((Combine.PerKey) transform).getSideInputs(), outputDataSet, context);
+      context.setOutputDataSet(context.getOutput(transform), outputDataSet);
     }
   }
 
