@@ -66,6 +66,7 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableList;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
 import org.apache.kafka.clients.consumer.Consumer;
@@ -347,6 +348,12 @@ public class KafkaIO {
     abstract Duration getMaxReadTime();
 
     @Nullable
+    abstract Instant getMinTimestamp();
+
+    @Nullable
+    abstract Instant getMaxTimestamp();
+
+    @Nullable
     abstract Instant getStartReadTime();
 
     abstract boolean isCommitOffsetsInFinalizeEnabled();
@@ -385,6 +392,10 @@ public class KafkaIO {
       abstract Builder<K, V> setMaxNumRecords(long maxNumRecords);
 
       abstract Builder<K, V> setMaxReadTime(Duration maxReadTime);
+
+      abstract Builder<K, V> setMinTimestamp(Instant minTimestamp);
+
+      abstract Builder<K, V> setMaxTimestamp(Instant maxTimestamp);
 
       abstract Builder<K, V> setStartReadTime(Instant startReadTime);
 
@@ -639,6 +650,14 @@ public class KafkaIO {
       return toBuilder().setMaxReadTime(maxReadTime).build();
     }
 
+    public Read<K, V> withMinTimestamp(Instant minTimestamp) {
+      return toBuilder().setMinTimestamp(minTimestamp).build();
+    }
+
+    public Read<K, V> withMaxTimestamp(Instant maxTimestamp) {
+      return toBuilder().setMaxTimestamp(maxTimestamp).build();
+    }
+
     /**
      * Sets {@link TimestampPolicy} to {@link TimestampPolicyFactory.LogAppendTimePolicy}. The
      * policy assigns Kafka's log append time (server side ingestion time) to each record. The
@@ -886,6 +905,18 @@ public class KafkaIO {
       if (getMaxNumRecords() < Long.MAX_VALUE || getMaxReadTime() != null) {
         transform =
             unbounded.withMaxReadTime(getMaxReadTime()).withMaxNumRecords(getMaxNumRecords());
+      }
+
+      if (getMaxTimestamp() != null) {
+        Preconditions.checkArgument(getMaxReadTime() == null);
+        Preconditions.checkArgument(getMaxNumRecords() == Long.MAX_VALUE);
+        if (getMinTimestamp() != null) {
+          transform =
+                  unbounded.withMaxTimestamp(getMaxTimestamp()).withMinTimestamp(getMinTimestamp());
+        } else {
+          transform =
+                  unbounded.withMaxTimestamp(getMaxTimestamp());
+        }
       }
 
       return input.getPipeline().apply(transform);

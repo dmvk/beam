@@ -42,6 +42,7 @@ import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.ValueWithRecordId;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.util.concurrent.Uninterruptibles;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -51,14 +52,17 @@ import org.joda.time.Instant;
  * as one or both of a maximum number of elements or a maximum period of time to read.
  */
 public class BoundedReadFromUnboundedSource<T> extends PTransform<PBegin, PCollection<T>> {
-  private final UnboundedSource<T, ?> source;
-  private final long maxNumRecords;
-  private final @Nullable Duration maxReadTime;
 
   private static final FluentBackoff BACKOFF_FACTORY =
       FluentBackoff.DEFAULT
           .withInitialBackoff(Duration.millis(10))
           .withMaxBackoff(Duration.standardSeconds(10));
+
+  private final UnboundedSource<T, ?> source;
+  private final long maxNumRecords;
+  private final @Nullable Duration maxReadTime;
+  private final Instant minTimestamp;
+  private final Instant maxTimestamp;
 
   /**
    * Returns a new {@link BoundedReadFromUnboundedSource} that reads a bounded amount of data from
@@ -67,7 +71,8 @@ public class BoundedReadFromUnboundedSource<T> extends PTransform<PBegin, PColle
    * <p>This may take a long time to execute if the splits of this source are slow to read records.
    */
   public BoundedReadFromUnboundedSource<T> withMaxNumRecords(long maxNumRecords) {
-    return new BoundedReadFromUnboundedSource<>(source, maxNumRecords, maxReadTime);
+    return new BoundedReadFromUnboundedSource<>(
+        source, maxNumRecords, maxReadTime, minTimestamp, maxTimestamp);
   }
 
   /**
@@ -76,19 +81,43 @@ public class BoundedReadFromUnboundedSource<T> extends PTransform<PBegin, PColle
    * Each split of the source will read for this much time.
    */
   public BoundedReadFromUnboundedSource<T> withMaxReadTime(Duration maxReadTime) {
-    return new BoundedReadFromUnboundedSource<>(source, maxNumRecords, maxReadTime);
+    return new BoundedReadFromUnboundedSource<>(
+        source, maxNumRecords, maxReadTime, minTimestamp, maxTimestamp);
+  }
+
+  public BoundedReadFromUnboundedSource<T> withMinTimestamp(Instant minTimestamp) {
+    return new BoundedReadFromUnboundedSource<>(
+        source, maxNumRecords, maxReadTime, minTimestamp, maxTimestamp);
+  }
+
+  public BoundedReadFromUnboundedSource<T> withMaxTimestamp(Instant maxTimestamp) {
+    return new BoundedReadFromUnboundedSource<>(
+        source, maxNumRecords, maxReadTime, minTimestamp, maxTimestamp);
   }
 
   BoundedReadFromUnboundedSource(
-      UnboundedSource<T, ?> source, long maxNumRecords, @Nullable Duration maxReadTime) {
+      UnboundedSource<T, ?> source,
+      long maxNumRecords,
+      @Nullable Duration maxReadTime,
+      Instant minTimestamp,
+      Instant maxTimestamp) {
+    Preconditions.checkState(
+        minTimestamp.isBefore(maxTimestamp),
+        "Min timestamp [%s] is after max timestamp [%s].",
+        minTimestamp,
+        maxTimestamp);
     this.source = source;
     this.maxNumRecords = maxNumRecords;
     this.maxReadTime = maxReadTime;
+    this.minTimestamp = minTimestamp;
+    this.maxTimestamp = maxTimestamp;
   }
 
   @Override
   public PCollection<T> expand(PBegin input) {
-    Coder<Shard<T>> shardCoder = SerializableCoder.of((Class<Shard<T>>) (Class) Shard.class);
+    @SuppressWarnings("unchecked")
+    final Class<Shard<T>> shardClass = (Class) Shard.class;
+    Coder<Shard<T>> shardCoder = SerializableCoder.of(shardClass);
     PCollection<ValueWithRecordId<T>> read =
         input
             .apply(
@@ -98,6 +127,8 @@ public class BoundedReadFromUnboundedSource<T> extends PTransform<PBegin, PColle
                             .setSource(source)
                             .setMaxNumRecords(maxNumRecords)
                             .setMaxReadTime(maxReadTime)
+                            .setMinTimestamp(minTimestamp)
+                            .setMaxTimestamp(maxTimestamp)
                             .build())
                     .withCoder(shardCoder))
             .apply("Split", ParDo.of(new SplitFn<>()))
@@ -196,8 +227,23 @@ public class BoundedReadFromUnboundedSource<T> extends PTransform<PBegin, PColle
           if (!available && !advanceWithBackoff(reader, endTime)) {
             break;
           }
+          if (reader.getCurrentTimestamp().isBefore(shard.getMinTimestamp())) {
+            // Filter records before min timestamp (inclusive).
+            continue;
+          }
+          if (reader.getCurrentTimestamp().isAfter(shard.getMaxTimestamp().minus(1))) {
+            // We are already receiving events pass maximum allowed watermark. Skip them until
+            // watermark reaches max.
+            if (reader.getWatermark().isAfter(shard.getMaxTimestamp().minus(1))) {
+              // Done reading the split.
+              break;
+            } else {
+              // We may still get records with timestamp before watermark.
+              continue;
+            }
+          }
           out.outputWithTimestamp(
-              new ValueWithRecordId<T>(reader.getCurrent(), reader.getCurrentRecordId()),
+              new ValueWithRecordId<>(reader.getCurrent(), reader.getCurrentRecordId()),
               reader.getCurrentTimestamp());
         }
         reader.getCheckpointMark().finalizeCheckpoint();
@@ -228,13 +274,16 @@ public class BoundedReadFromUnboundedSource<T> extends PTransform<PBegin, PColle
    */
   @AutoValue
   abstract static class Shard<T> implements Serializable {
-    @Nullable
     abstract UnboundedSource<T, ?> getSource();
 
     abstract long getMaxNumRecords();
 
     @Nullable
     abstract Duration getMaxReadTime();
+
+    abstract Instant getMinTimestamp();
+
+    abstract Instant getMaxTimestamp();
 
     abstract Builder<T> toBuilder();
 
@@ -245,6 +294,10 @@ public class BoundedReadFromUnboundedSource<T> extends PTransform<PBegin, PColle
       abstract Builder<T> setMaxNumRecords(long maxNumRecords);
 
       abstract Builder<T> setMaxReadTime(@Nullable Duration maxReadTime);
+
+      abstract Builder<T> setMinTimestamp(Instant minTimestamp);
+
+      abstract Builder<T> setMaxTimestamp(Instant maxWatermark);
 
       abstract Shard<T> build();
     }

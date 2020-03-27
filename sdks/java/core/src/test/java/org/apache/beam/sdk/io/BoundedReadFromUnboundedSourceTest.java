@@ -28,8 +28,13 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.DelegateCoder;
@@ -46,6 +51,7 @@ import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
+import org.junit.Assert;
 import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
@@ -389,5 +395,38 @@ public class BoundedReadFromUnboundedSourceTest implements Serializable {
     assertTrue(reader.start());
     assertEquals(1L, (long) reader.getCurrent().getValue());
     assertFalse(reader.advance());
+  }
+
+  @Test
+  @Category(NeedsRunner.class)
+  public void testMinMaxTimestamp() {
+    final TestCountingSource source = new TestCountingSource(Integer.MAX_VALUE);
+    final long minTimestamp = 10;
+    final long maxTimestamp = 40;
+    final PCollection<KV<Integer, Integer>> output =
+        p.apply(
+            Read.from(source)
+                .withMaxTimestamp(Instant.ofEpochMilli(maxTimestamp))
+                .withMinTimestamp(Instant.ofEpochMilli(minTimestamp)));
+    PAssert.that(output)
+        .satisfies(
+            it -> {
+              final Map<Integer, Integer> counts = new HashMap<>();
+              it.forEach(kv -> counts.merge(kv.getValue(), 1, Integer::sum));
+              counts.forEach((k, v) -> System.out.println(k + ": " + v));
+              final List<Integer> keys =
+                  counts.keySet().stream()
+                      .sorted(Comparator.comparingInt(k -> k))
+                      .collect(Collectors.toList());
+              Assert.assertEquals(
+                  IntStream.range((int) minTimestamp, (int) maxTimestamp)
+                      .boxed()
+                      .collect(Collectors.toList()),
+                  keys);
+              // All keys should have same count (count = number of splits).
+              Assert.assertEquals(1, counts.values().stream().distinct().count());
+              return null;
+            });
+    p.run();
   }
 }

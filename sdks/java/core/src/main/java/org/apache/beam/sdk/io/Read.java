@@ -20,6 +20,7 @@ package org.apache.beam.sdk.io;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.display.DisplayData;
+import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.util.NameUtils;
 import org.apache.beam.sdk.util.SerializableUtils;
 import org.apache.beam.sdk.values.PBegin;
@@ -27,6 +28,7 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollection.IsBounded;
 import org.apache.beam.sdk.values.WindowingStrategy;
 import org.joda.time.Duration;
+import org.joda.time.Instant;
 
 /**
  * A {@link PTransform} for reading from a {@link Source}.
@@ -137,7 +139,12 @@ public class Read {
      * records.
      */
     public BoundedReadFromUnboundedSource<T> withMaxNumRecords(long maxNumRecords) {
-      return new BoundedReadFromUnboundedSource<>(source, maxNumRecords, null);
+      return new BoundedReadFromUnboundedSource<>(
+          source,
+          maxNumRecords,
+          null,
+          BoundedWindow.TIMESTAMP_MIN_VALUE,
+          BoundedWindow.TIMESTAMP_MAX_VALUE);
     }
 
     /**
@@ -146,7 +153,17 @@ public class Read {
      * Each split of the source will read for this much time.
      */
     public BoundedReadFromUnboundedSource<T> withMaxReadTime(Duration maxReadTime) {
-      return new BoundedReadFromUnboundedSource<>(source, Long.MAX_VALUE, maxReadTime);
+      return new BoundedReadFromUnboundedSource<>(
+          source,
+          Long.MAX_VALUE,
+          maxReadTime,
+          BoundedWindow.TIMESTAMP_MIN_VALUE,
+          BoundedWindow.TIMESTAMP_MAX_VALUE);
+    }
+
+    public BoundedReadFromUnboundedSource<T> withMaxTimestamp(Instant maxTimestamp) {
+      return new BoundedReadFromUnboundedSource<>(
+          source, Long.MAX_VALUE, null, BoundedWindow.TIMESTAMP_MIN_VALUE, maxTimestamp);
     }
 
     @Override
