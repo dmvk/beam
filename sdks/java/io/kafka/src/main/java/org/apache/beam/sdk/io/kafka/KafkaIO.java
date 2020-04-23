@@ -912,10 +912,9 @@ public class KafkaIO {
         Preconditions.checkArgument(getMaxNumRecords() == Long.MAX_VALUE);
         if (getMinTimestamp() != null) {
           transform =
-                  unbounded.withMaxTimestamp(getMaxTimestamp()).withMinTimestamp(getMinTimestamp());
+              unbounded.withMaxTimestamp(getMaxTimestamp()).withMinTimestamp(getMinTimestamp());
         } else {
-          transform =
-                  unbounded.withMaxTimestamp(getMaxTimestamp());
+          transform = unbounded.withMaxTimestamp(getMaxTimestamp());
         }
       }
 

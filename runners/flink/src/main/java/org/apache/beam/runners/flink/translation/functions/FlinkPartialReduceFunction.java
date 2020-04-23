@@ -59,15 +59,15 @@ public class FlinkPartialReduceFunction<K, InputT, AccumT, W extends BoundedWind
       WindowingStrategy<Object, W> windowingStrategy,
       Map<PCollectionView<?>, WindowingStrategy<?, ?>> sideInputs,
       PipelineOptions pipelineOptions) {
-      this(combineFn, windowingStrategy, sideInputs, pipelineOptions, false);
+    this(combineFn, windowingStrategy, sideInputs, pipelineOptions, false);
   }
 
   public FlinkPartialReduceFunction(
-          CombineFnBase.GlobalCombineFn<InputT, AccumT, ?> combineFn,
-          WindowingStrategy<Object, W> windowingStrategy,
-          Map<PCollectionView<?>, WindowingStrategy<?, ?>> sideInputs,
-          PipelineOptions pipelineOptions,
-          boolean optimized) {
+      CombineFnBase.GlobalCombineFn<InputT, AccumT, ?> combineFn,
+      WindowingStrategy<Object, W> windowingStrategy,
+      Map<PCollectionView<?>, WindowingStrategy<?, ?>> sideInputs,
+      PipelineOptions pipelineOptions,
+      boolean optimized) {
     this.combineFn = combineFn;
     this.windowingStrategy = windowingStrategy;
     this.sideInputs = sideInputs;
@@ -98,7 +98,7 @@ public class FlinkPartialReduceFunction<K, InputT, AccumT, W extends BoundedWind
       reduceRunner = new GroupedFlinkCombineRunner<>();
     } else {
       if (!windowingStrategy.getWindowFn().isNonMerging()
-              && !windowingStrategy.getWindowFn().windowCoder().equals(IntervalWindow.getCoder())) {
+          && !windowingStrategy.getWindowFn().windowCoder().equals(IntervalWindow.getCoder())) {
         reduceRunner = new HashingFlinkCombineRunner<>();
       } else {
         reduceRunner = new SortingFlinkCombineRunner<>();

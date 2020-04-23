@@ -55,12 +55,13 @@ public class FlinkReduceFunction<K, AccumT, OutputT, W extends BoundedWindow>
   private final boolean optimized;
 
   public FlinkReduceFunction(
-          CombineFnBase.GlobalCombineFn<?, AccumT, OutputT> combineFn,
-          WindowingStrategy<Object, W> windowingStrategy,
-          Map<PCollectionView<?>, WindowingStrategy<?, ?>> sideInputs,
-          PipelineOptions pipelineOptions) {
+      CombineFnBase.GlobalCombineFn<?, AccumT, OutputT> combineFn,
+      WindowingStrategy<Object, W> windowingStrategy,
+      Map<PCollectionView<?>, WindowingStrategy<?, ?>> sideInputs,
+      PipelineOptions pipelineOptions) {
     this(combineFn, windowingStrategy, sideInputs, pipelineOptions, false);
   }
+
   public FlinkReduceFunction(
       CombineFnBase.GlobalCombineFn<?, AccumT, OutputT> combineFn,
       WindowingStrategy<Object, W> windowingStrategy,
@@ -97,7 +98,7 @@ public class FlinkReduceFunction<K, AccumT, OutputT, W extends BoundedWindow>
       reduceRunner = new GroupedFlinkCombineRunner<>();
     } else {
       if (!windowingStrategy.getWindowFn().isNonMerging()
-              && !windowingStrategy.getWindowFn().windowCoder().equals(IntervalWindow.getCoder())) {
+          && !windowingStrategy.getWindowFn().windowCoder().equals(IntervalWindow.getCoder())) {
         reduceRunner = new HashingFlinkCombineRunner<>();
       } else {
         reduceRunner = new SortingFlinkCombineRunner<>();

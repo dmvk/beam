@@ -44,7 +44,8 @@ public class CoderTypeSerializer<T> extends TypeSerializer<T> {
   private final Coder<T> coder;
 
   @SuppressWarnings("unused")
-  @Nullable private final SerializablePipelineOptions pipelineOptions;
+  @Nullable
+  private final SerializablePipelineOptions pipelineOptions;
 
   public CoderTypeSerializer(Coder<T> coder) {
     Preconditions.checkNotNull(coder);
@@ -52,7 +53,8 @@ public class CoderTypeSerializer<T> extends TypeSerializer<T> {
     this.pipelineOptions = null;
   }
 
-  public CoderTypeSerializer(Coder<T> coder, @Nullable SerializablePipelineOptions pipelineOptions) {
+  public CoderTypeSerializer(
+      Coder<T> coder, @Nullable SerializablePipelineOptions pipelineOptions) {
     Preconditions.checkNotNull(coder);
     this.coder = coder;
     this.pipelineOptions = pipelineOptions;

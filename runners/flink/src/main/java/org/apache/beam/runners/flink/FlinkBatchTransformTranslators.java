@@ -122,7 +122,8 @@ class FlinkBatchTransformTranslators {
         PTransformTranslation.CREATE_VIEW_TRANSFORM_URN,
         new CreatePCollectionViewTranslatorBatch());
     registerTranslator(
-            PTransformTranslation.COMBINE_PER_KEY_TRANSFORM_URN, new NonMergingCombinePerKeyTranslatorBatch());
+        PTransformTranslation.COMBINE_PER_KEY_TRANSFORM_URN,
+        new NonMergingCombinePerKeyTranslatorBatch());
     registerTranslator(
         PTransformTranslation.COMBINE_PER_KEY_TRANSFORM_URN, new CombinePerKeyTranslatorBatch());
     registerTranslator(
@@ -534,8 +535,8 @@ class FlinkBatchTransformTranslators {
           context.getTypeInfo(context.getOutput(transform));
       Grouping<WindowedValue<KV<K, AccumT>>> intermediateGrouping =
           groupCombine.groupBy(
-                  new WindowedKvKeySelector<>(
-                          inputCoder.getKeyCoder(), windowingStrategy.getWindowFn().windowCoder()));
+              new WindowedKvKeySelector<>(
+                  inputCoder.getKeyCoder(), windowingStrategy.getWindowFn().windowCoder()));
       // Fully reduce the values and create output format OutputT
       GroupReduceOperator<WindowedValue<KV<K, AccumT>>, WindowedValue<KV<K, OutputT>>>
           outputDataSet =
