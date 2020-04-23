@@ -92,6 +92,8 @@ import org.apache.flink.api.java.operators.GroupReduceOperator;
 import org.apache.flink.api.java.operators.Grouping;
 import org.apache.flink.api.java.operators.SingleInputUdfOperator;
 import org.apache.flink.api.java.operators.UnsortedGrouping;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.optimizer.Optimizer;
 
 /**
  * Translators for transforming {@link PTransform PTransforms} to Flink {@link DataSet DataSets}.
@@ -385,15 +387,19 @@ class FlinkBatchTransformTranslators {
       final DataSet<WindowedValue<KV<K, InputT>>> inputDataSet =
           context.getInputDataSet(context.getInput(transform));
 
-      @SuppressWarnings("unchecked")
       final CoderTypeInformation<WindowedValue<KV<K, InputT>>> inputType =
-          (CoderTypeInformation) inputDataSet.getType();
+          (CoderTypeInformation<WindowedValue<KV<K, InputT>>>) inputDataSet.getType();
       final DataSet<WindowedValue<KV<K, InputT>>> retypedDataSet =
           inputDataSet
               .map(FlinkIdentityMapFunction.of())
               .returns(inputType.withPipelineOptions(context.getPipelineOptions()));
 
-      context.setOutputDataSet(context.getOutput(transform), retypedDataSet.rebalance());
+      final Configuration partitionOptions = new Configuration();
+      partitionOptions.setString(
+          Optimizer.HINT_SHIP_STRATEGY, Optimizer.HINT_SHIP_STRATEGY_REPARTITION);
+      context.setOutputDataSet(
+          context.getOutput(transform),
+          retypedDataSet.map(FlinkIdentityMapFunction.of()).withParameters(partitionOptions));
     }
   }
 
