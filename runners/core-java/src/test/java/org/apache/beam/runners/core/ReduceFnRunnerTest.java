@@ -19,6 +19,7 @@ package org.apache.beam.runners.core;
 
 import static org.apache.beam.runners.core.WindowMatchers.isSingleWindowedValue;
 import static org.apache.beam.runners.core.WindowMatchers.isWindowedValue;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -29,7 +30,6 @@ import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.doAnswer;
@@ -84,6 +84,7 @@ import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.WindowingStrategy;
 import org.apache.beam.sdk.values.WindowingStrategy.AccumulationMode;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
+import org.hamcrest.Matchers;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.junit.Before;
@@ -133,8 +134,8 @@ public class ReduceFnRunnerTest {
     firstWindow = new IntervalWindow(new Instant(0), new Instant(10));
   }
 
-  private void injectElement(ReduceFnTester<Integer, ?, IntervalWindow> tester, int element)
-      throws Exception {
+  private <WindowT extends BoundedWindow> void injectElement(
+      ReduceFnTester<Integer, ?, WindowT> tester, int element) throws Exception {
     doNothing().when(mockTriggerStateMachine).onElement(anyElementContext());
     tester.injectElements(TimestampedValue.of(element, new Instant(element)));
   }
@@ -158,8 +159,7 @@ public class ReduceFnRunnerTest {
   private void triggerShouldFinish(TriggerStateMachine mockTrigger) throws Exception {
     doAnswer(
             invocation -> {
-              @SuppressWarnings("unchecked")
-              TriggerStateMachine.TriggerContext context =
+              final TriggerStateMachine.TriggerContext context =
                   (TriggerStateMachine.TriggerContext) invocation.getArguments()[0];
               context.trigger().setFinished(true);
               return null;
@@ -196,6 +196,43 @@ public class ReduceFnRunnerTest {
         contains(
             isSingleWindowedValue(
                 equalTo(7), 2, 0, 100, PaneInfo.createPane(true, false, Timing.EARLY, 0, 0))));
+  }
+
+  @Test
+  public void testLateElementsInGlobalWindowWithLatestTimestampCombiner() throws Exception {
+    WindowingStrategy<?, GlobalWindow> strategy =
+        WindowingStrategy.of(new GlobalWindows())
+            .withTimestampCombiner(TimestampCombiner.LATEST)
+            .withMode(AccumulationMode.ACCUMULATING_FIRED_PANES)
+            .withAllowedLateness(Duration.ZERO)
+            .withTrigger(
+                Repeatedly.forever(
+                    AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.millis(10))));
+
+    ReduceFnTester<Integer, Integer, GlobalWindow> tester =
+        ReduceFnTester.combining(strategy, Sum.ofIntegers(), VarIntCoder.of());
+
+    final int lowerTimestamp = 2;
+    final int higherTimestamp = 5;
+    // Progress input watermark so elements are late.
+    tester.advanceInputWatermark(new Instant(higherTimestamp + 1));
+    tester.advanceProcessingTime(new Instant(5000));
+    injectElement(tester, lowerTimestamp); // processing timer @ 5000 + 10
+    injectElement(tester, higherTimestamp);
+
+    tester.advanceProcessingTime(new Instant(10000));
+
+    tester.assertHasOnlyGlobalAndStateFor(GlobalWindow.INSTANCE);
+
+    List<WindowedValue<Integer>> windowedValues = tester.extractOutput();
+    assertThat(
+        windowedValues,
+        contains(
+            isSingleWindowedValue(
+                equalTo(lowerTimestamp + higherTimestamp),
+                Matchers.equalTo(new Instant(higherTimestamp)),
+                Matchers.equalTo(GlobalWindow.INSTANCE),
+                Matchers.equalTo(PaneInfo.createPane(true, false, Timing.EARLY, 0, 0)))));
   }
 
   @Test
@@ -1614,7 +1651,7 @@ public class ReduceFnRunnerTest {
         isSingleWindowedValue(
             containsInAnyOrder(1),
             equalTo(new Instant(1)), // timestamp
-            equalTo((BoundedWindow) mergedWindow)));
+            equalTo(mergedWindow)));
 
     assertThat(
         output.get(0).getPane(), equalTo(PaneInfo.createPane(true, true, Timing.ON_TIME, 0, 0)));

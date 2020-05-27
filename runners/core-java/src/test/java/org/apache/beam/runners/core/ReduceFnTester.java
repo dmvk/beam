@@ -596,7 +596,7 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
    * elements.
    */
   private class TestOutputWindowedValue implements OutputWindowedValue<KV<String, OutputT>> {
-    private List<WindowedValue<KV<String, OutputT>>> outputs = new ArrayList<>();
+    private final List<WindowedValue<KV<String, OutputT>>> outputs = new ArrayList<>();
 
     @Override
     public void outputWindowedValue(
@@ -625,9 +625,9 @@ public class ReduceFnTester<InputT, OutputT, W extends BoundedWindow> {
 
   private static class TestAssignContext<W extends BoundedWindow>
       extends WindowFn<Object, W>.AssignContext {
-    private Object element;
-    private Instant timestamp;
-    private BoundedWindow window;
+    private final Object element;
+    private final Instant timestamp;
+    private final BoundedWindow window;
 
     public TestAssignContext(
         WindowFn<Object, W> windowFn, Object element, Instant timestamp, BoundedWindow window) {
