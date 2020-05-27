@@ -22,6 +22,8 @@ import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Prec
 import java.io.Serializable;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Stream;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.state.ReadableState;
 import org.apache.beam.sdk.state.WatermarkHoldState;
@@ -407,19 +409,16 @@ class WatermarkHold<W extends BoundedWindow> implements Serializable {
       @Override
       public OldAndNewHolds read() {
         // Read both the element and extra holds.
-        @Nullable Instant elementHold = elementHoldState.read();
-        @Nullable Instant extraHold = extraHoldState.read();
-        @Nullable Instant oldHold;
-        // Find the minimum, accounting for null.
-        if (elementHold == null) {
-          oldHold = extraHold;
-        } else if (extraHold == null) {
-          oldHold = elementHold;
-        } else if (elementHold.isBefore(extraHold)) {
-          oldHold = elementHold;
-        } else {
-          oldHold = extraHold;
-        }
+        final @Nullable Instant elementHold = elementHoldState.read();
+        final @Nullable Instant extraHold = extraHoldState.read();
+
+        @Nullable
+        Instant oldHold =
+            Stream.of(elementHold, extraHold)
+                .filter(Objects::nonNull)
+                .min(Instant::compareTo)
+                .orElse(null);
+
         if (oldHold == null || oldHold.isAfter(context.window().maxTimestamp())) {
           // If no hold (eg because all elements came in before the output watermark), or
           // the hold was for garbage collection, take the end of window as the result.
@@ -429,7 +428,16 @@ class WatermarkHold<W extends BoundedWindow> implements Serializable {
               oldHold,
               context.key(),
               context.window());
-          oldHold = context.window().maxTimestamp();
+          if (windowingStrategy.getTimestampCombiner().equals(TimestampCombiner.END_OF_WINDOW)) {
+            oldHold = context.window().maxTimestamp();
+          } else {
+            // Earliest and Latest timestamp combiners.
+            @Nullable final Instant outputWatermark = timerInternals.currentOutputWatermarkTime();
+            oldHold =
+                outputWatermark != null && outputWatermark.isBefore(context.window().maxTimestamp())
+                    ? outputWatermark
+                    : context.window().maxTimestamp();
+          }
         }
         WindowTracing.debug(
             "WatermarkHold.extractAndRelease.read: clearing for key:{}; window:{}",

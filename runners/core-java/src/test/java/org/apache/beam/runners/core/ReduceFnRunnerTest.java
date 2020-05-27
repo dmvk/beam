@@ -200,7 +200,7 @@ public class ReduceFnRunnerTest {
 
   @Test
   public void testLateElementsInGlobalWindowWithLatestTimestampCombiner() throws Exception {
-    WindowingStrategy<?, GlobalWindow> strategy =
+    final WindowingStrategy<?, GlobalWindow> strategy =
         WindowingStrategy.of(new GlobalWindows())
             .withTimestampCombiner(TimestampCombiner.LATEST)
             .withMode(AccumulationMode.ACCUMULATING_FIRED_PANES)
@@ -209,30 +209,51 @@ public class ReduceFnRunnerTest {
                 Repeatedly.forever(
                     AfterProcessingTime.pastFirstElementInPane().plusDelayOf(Duration.millis(10))));
 
-    ReduceFnTester<Integer, Integer, GlobalWindow> tester =
+    final ReduceFnTester<Integer, Integer, GlobalWindow> tester =
         ReduceFnTester.combining(strategy, Sum.ofIntegers(), VarIntCoder.of());
 
-    final int lowerTimestamp = 2;
-    final int higherTimestamp = 5;
-    // Progress input watermark so elements are late.
-    tester.advanceInputWatermark(new Instant(higherTimestamp + 1));
-    tester.advanceProcessingTime(new Instant(5000));
+    final int lowerTimestamp = 5;
+    final int higherTimestamp = 10;
+
+    tester.advanceProcessingTime(new Instant(5_000));
+
+    // First batch of elements is on-time.
+    tester.advanceInputWatermark(new Instant(0));
     injectElement(tester, lowerTimestamp); // processing timer @ 5000 + 10
     injectElement(tester, higherTimestamp);
 
-    tester.advanceProcessingTime(new Instant(10000));
+    // Fire processing time trigger.
+    tester.advanceProcessingTime(new Instant(10_000));
 
+    // Second batch of elements is late. Combined element hold is lower than currentOutputWatermark.
+    tester.advanceInputWatermark(new Instant(higherTimestamp + 1));
+    injectElement(tester, lowerTimestamp); // processing timer @ 5000 + 10
+    injectElement(tester, higherTimestamp);
+    tester.advanceProcessingTime(new Instant(15_000));
+
+    // Fire processing time trigger.
     tester.assertHasOnlyGlobalAndStateFor(GlobalWindow.INSTANCE);
 
-    List<WindowedValue<Integer>> windowedValues = tester.extractOutput();
+    final List<WindowedValue<Integer>> outputs = tester.extractOutput();
+    assertEquals(2, outputs.size());
+
+    // First firing should have combined element hold timestamp.
     assertThat(
-        windowedValues,
-        contains(
-            isSingleWindowedValue(
-                equalTo(lowerTimestamp + higherTimestamp),
-                Matchers.equalTo(new Instant(higherTimestamp)),
-                Matchers.equalTo(GlobalWindow.INSTANCE),
-                Matchers.equalTo(PaneInfo.createPane(true, false, Timing.EARLY, 0, 0)))));
+        outputs.get(0),
+        isSingleWindowedValue(
+            equalTo(lowerTimestamp + higherTimestamp),
+            Matchers.equalTo(new Instant(higherTimestamp)),
+            Matchers.equalTo(GlobalWindow.INSTANCE),
+            Matchers.equalTo(PaneInfo.createPane(true, false, Timing.EARLY, 0, 0))));
+
+    // Second firing should have timestamp of current output watermark.
+    assertThat(
+        outputs.get(1),
+        isSingleWindowedValue(
+            equalTo(2 * (lowerTimestamp + higherTimestamp)),
+            Matchers.equalTo(new Instant(higherTimestamp + 1)),
+            Matchers.equalTo(GlobalWindow.INSTANCE),
+            Matchers.equalTo(PaneInfo.createPane(false, false, Timing.EARLY, 1, -1))));
   }
 
   @Test
